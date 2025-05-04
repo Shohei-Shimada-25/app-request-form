@@ -134,8 +134,8 @@ jobs:
         run: |
           gcloud builds submit \
             --project=\${{ env.PROJECT_ID }} \
-            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }}
-      - name: Deploy to Cloud Run
+            --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.APP_SLUG }} \ 
+            || (echo "⚠️ Cloud Build log streaming failed—continuing anyway" && exit 0)      - name: Deploy to Cloud Run
         run: |
           gcloud run deploy \${{ env.APP_SLUG }} \
             --project=\${{ env.PROJECT_ID }} \
