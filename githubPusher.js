@@ -11,7 +11,6 @@ const GITHUB_TOKEN    = process.env.GITHUB_TOKEN;
 const GITHUB_USER     = process.env.GITHUB_USER;
 const GCP_SA_KEY_FILE = process.env.GCP_SA_KEY_FILE;
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
-// ここで .env から「GOOGLE_CLOUD_PROJECT」を受け取っている前提
 const PROJECT_ID      = process.env.GOOGLE_CLOUD_PROJECT;
 const REGION          = process.env.CLOUD_RUN_REGION || 'asia-northeast1';
 
@@ -19,7 +18,6 @@ if (!PROJECT_ID) {
   throw new Error('環境変数 GOOGLE_CLOUD_PROJECT が設定されていません');
 }
 
-// ─── slugify ─────────────────────────────────────────────────────
 function slugify(name) {
   return name
     .toLowerCase()
@@ -28,18 +26,17 @@ function slugify(name) {
     .replace(/-{2,}/g, '-');
 }
 
-// ─── メイン ─────────────────────────────────────────────────────
 async function pushCodeToRepository(repoUrl, appName, appDescription) {
   try {
     const slug = slugify(appName);
     console.log('✅ app slug =', slug);
 
-    // 作業ディレクトリ作成
+    // ① 作業用ディレクトリ
     const tempDir = path.join(__dirname, `app-${slug}-${Date.now()}`);
     fs.mkdirSync(tempDir);
     console.log(`✅ ① 作業用ディレクトリ: ${tempDir}`);
 
-    // ChatGPT にコード生成依頼
+    // ② ChatGPT へコード生成依頼
     console.log('⏳ ② ChatGPT へコード生成依頼中…');
     const openaiRes = await axios.post(
       'https://api.openai.com/v1/chat/completions',
@@ -48,9 +45,9 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
         messages: [
           { role: 'system', content: `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
-- デザインは Google Material Design ガイドライン
+- デザインは Material Design
 - HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
-- コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`）で出力
+- コードブロック（\`\`\`html\`\`\` など）で出力
 `.trim() },
           { role: 'user', content: appDescription }
         ],
@@ -61,16 +58,22 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
     );
     const reply = openaiRes.data.choices[0].message.content;
 
-    // コードパース
-    const html = (reply.match(/```html\s*([\s\S]*?)```/i)?.[1] ||
-                  reply.match(/<html[\s\S]*?<\/html>/i)?.[0] ||
-                  '<!DOCTYPE html><html><body>HTML not found</body></html>').trim();
-    const css  = (reply.match(/```css\s*([\s\S]*?)```/i)?.[1] ||
-                  (reply.match(/<style[\s\S]*?<\/style>/i)?.[0] || '').replace(/<\/?style>/gi, '').trim() ||
-                  '/* CSS not found */');
-    const js   = (reply.match(/```js\s*([\s\S]*?)```/i)?.[1] ||
-                  (reply.match(/<script[\s\S]*?<\/script>/i)?.[0] || '').replace(/<\/?script>/gi, '').trim() ||
-                  `console.warn('JS not found');`);
+    // ③ HTML/CSS/JS 抽出
+    const html = (
+      reply.match(/```html\s*([\s\S]*?)```/i)?.[1] ||
+      reply.match(/<html[\s\S]*?<\/html>/i)?.[0] ||
+      '<!DOCTYPE html><html><body>HTML not found</body></html>'
+    ).trim();
+    const css = (
+      reply.match(/```css\s*([\s\S]*?)```/i)?.[1] ||
+      (reply.match(/<style[\s\S]*?<\/style>/i)?.[0] || '').replace(/<\/?style>/gi, '') ||
+      '/* CSS not found */'
+    ).trim();
+    const js = (
+      reply.match(/```js\s*([\s\S]*?)```/i)?.[1] ||
+      (reply.match(/<script[\s\S]*?<\/script>/i)?.[0] || '').replace(/<\/?script>/gi, '') ||
+      `console.warn('JS not found');`
+    ).trim();
 
     // ファイル書き出し
     fs.writeFileSync(path.join(tempDir, 'index.html'), html);
@@ -89,7 +92,7 @@ COPY script.js   /usr/share/nginx/html/script.js
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
-    // ─── GitHub Actions ワークフロー生成 ────────────────────────────
+    // GitHub Actions ワークフロー生成
     const workflowsDir = path.join(tempDir, '.github', 'workflows');
     fs.mkdirSync(workflowsDir, { recursive: true });
     const workflowYml = `
@@ -122,7 +125,8 @@ jobs:
         run: |
           gcloud builds submit \
             --project=\${{ env.PROJECT_ID }} \
-            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }}
+            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
+          || (echo "⚠️ Cloud Build log streaming failed" && exit 0)
 
       - name: Deploy to Cloud Run
         run: |
@@ -135,38 +139,34 @@ jobs:
 `.trim();
     fs.writeFileSync(path.join(workflowsDir, 'deploy.yml'), workflowYml);
 
-    // Git 初期化 → Push
+    // Git Push
     execSync('git init', { cwd: tempDir });
     execSync('git branch -M main', { cwd: tempDir });
     execSync('git config user.name "GitHub Actions Bot"', { cwd: tempDir });
     execSync('git config user.email "actions@github.com"', { cwd: tempDir });
     execSync('git add .', { cwd: tempDir });
     execSync('git commit --allow-empty -m "Initial commit"', { cwd: tempDir });
-
     const repoName    = repoUrl.split('/').pop().replace(/\.git$/, '');
     const authRepoUrl = `https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${repoName}.git`;
     execSync(`git remote add origin ${authRepoUrl}`, { cwd: tempDir });
     execSync('git push origin main', { cwd: tempDir });
     console.log('✅ コードとワークフローを GitHub に Push しました');
 
-    // ─── Secrets 登録 ────────────────────────────────────────────
+    // GitHub Secrets 登録
     console.log('⏳ GitHub Secrets 登録中…');
     await new Promise(r => setTimeout(r, 3000));
-    const secretsUrl = `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`;
-    const gcpKeyB64  = fs.readFileSync(path.join(__dirname, GCP_SA_KEY_FILE), 'utf-8');
-    const svcJson    = Buffer.from(gcpKeyB64, 'base64').toString('utf-8');
-
-    const { data: publicKeyData } = await axios.get(
+    const publicKeyData = (await axios.get(
       `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/public-key`,
       { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
-    );
+    )).data;
     await sodium.ready;
+    const gcpKeyB64 = fs.readFileSync(path.join(__dirname, GCP_SA_KEY_FILE), 'utf-8');
     const encrypted = sodium.crypto_box_seal(
-      Buffer.from(svcJson),
+      Buffer.from(Buffer.from(gcpKeyB64, 'base64').toString('utf-8')),
       Buffer.from(publicKeyData.key, 'base64')
     );
     await axios.put(
-      secretsUrl,
+      `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`,
       { encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: publicKeyData.key_id },
       { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
     );
