@@ -47,7 +47,7 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
         messages: [
           { role: 'system', content: `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
-- デザインは Google Material Design ガイドライン
+- デザインは Google Material Design ガイドラインを意識する
 - HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
 - コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`）で出力
 `.trim() },
