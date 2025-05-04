@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>要件入力フォーム</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>アプリ要件入力</h1>
+    <form action="/submit" method="POST">
+      <label for="appName">アプリ名</label>
+      <input type="text" id="appName" name="appName" required />
+
+      <label for="appDescription">アプリ内容</label>
+      <textarea id="appDescription" name="appDescription" rows="5" required></textarea>
+
+      <button type="submit">送信</button>
+    </form>
+  </div>
+</body>
+</html>
