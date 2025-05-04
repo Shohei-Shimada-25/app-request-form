@@ -18,6 +18,7 @@ if (!PROJECT_ID) {
   throw new Error('環境変数 GOOGLE_CLOUD_PROJECT が設定されていません');
 }
 
+// slugify
 function slugify(name) {
   return name
     .toLowerCase()
@@ -26,23 +27,12 @@ function slugify(name) {
     .replace(/-{2,}/g, '-');
 }
 
-/**
- * code block or tag から中身を抽出するヘルパー
- */
-function extractCode(reply, fenceRe, tagRe, stripTagsRe) {
-  const fence = reply.match(fenceRe);
-  if (fence) return fence[1].trim();
-  const tag = reply.match(tagRe);
-  if (tag) return tag[0].replace(stripTagsRe, '').trim();
-  return null;
-}
-
 async function pushCodeToRepository(repoUrl, appName, appDescription) {
   try {
     const slug = slugify(appName);
     console.log('✅ app slug =', slug);
 
-    // ① 作業ディレクトリ
+    // ① 作業用ディレクトリ作成
     const tempDir = path.join(__dirname, `app-${slug}-${Date.now()}`);
     fs.mkdirSync(tempDir);
     console.log(`✅ ① 作業用ディレクトリ: ${tempDir}`);
@@ -54,15 +44,12 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
       {
         model: 'gpt-4o',
         messages: [
-          {
-            role: 'system',
-            content: `
+          { role: 'system', content: `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
-- デザインは Material Design
-- HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
-- コードブロック（\`\`\`html\`\`\` 等）で出力
-`.trim()
-          },
+- デザインは Google Material Design ガイドラインを意識する
+- HTML には <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script> を必ず含める
+- コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`, \`\`\`javascript\`\`\`）で出力してください
+`.trim() },
           { role: 'user', content: appDescription }
         ],
         temperature: 0.7,
@@ -72,35 +59,35 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
     );
     const reply = openaiRes.data.choices[0].message.content;
 
-    // ③ HTML/CSS/JS 抽出
-    const html = extractCode(
-      reply,
-      /```html\s*([\s\S]*?)```/i,
-      /<html[\s\S]*?<\/html>/i,
-      /<\/?html>|<!DOCTYPE html>/gi
-    ) || '<!DOCTYPE html><html><body>HTML not found</body></html>';
+    // ③ コードブロック優先パース
+    // HTML
+    const fenceHtml = reply.match(/```html\s*([\s\S]*?)```/i);
+    const html = (fenceHtml ? fenceHtml[1].trim()
+                : (reply.match(/<html[\s\S]*?<\/html>/i) || [''])[0])
+               || '<!DOCTYPE html><html><body>HTML not found</body></html>';
 
-    const css = extractCode(
-      reply,
-      /```css\s*([\s\S]*?)```/i,
-      /<style[\s\S]*?<\/style>/i,
-      /<\/?style>/gi
-    ) || '/* CSS not found */';
+    // CSS
+    const fenceCss = reply.match(/```css\s*([\s\S]*?)```/i);
+    const cssBlock = fenceCss ? fenceCss[1].trim()
+                   : (reply.match(/<style[\s\S]*?<\/style>/i) || [''])[0];
+    const css = cssBlock.replace(/<\/?style>/gi, '').trim() || '/* CSS not found */';
 
-    // js と javascript 両対応
-    const js = extractCode(
-      reply,
-      /```(?:js|javascript)\s*([\s\S]*?)```/i,
-      /<script[\s\S]*?<\/script>/i,
-      /<\/?script>/gi
-    ) || `console.warn('JS not found');`;
+    // JS (```js``` or ```javascript```)
+    const fenceJs = reply.match(/```(?:js|javascript)\s*([\s\S]*?)```/i);
+    const scriptTag = reply.match(/<script\b[^>]*>([\s\S]*?)<\/script>/i);
+    const rawJs = fenceJs
+      ? fenceJs[1].trim()
+      : (scriptTag ? scriptTag[1].trim() : '');
+    const js = rawJs || `console.warn('JS not found');`;
 
-    // ファイル出力
+    console.log('▶ extracted script.js:\n' + js);
+
+    // ④ ファイル書き出し
     fs.writeFileSync(path.join(tempDir, 'index.html'), html);
     fs.writeFileSync(path.join(tempDir, 'styles.css'), css);
     fs.writeFileSync(path.join(tempDir, 'script.js'), js);
 
-    // ④ Dockerfile
+    // ⑤ Dockerfile
     const dockerfile = `
 FROM nginx:alpine
 ENV PORT 8080
@@ -112,7 +99,7 @@ COPY script.js   /usr/share/nginx/html/script.js
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
-    // ⑤ GitHub Actions ワークフロー
+    // ⑥ GitHub Actions ワークフロー生成
     const workflowsDir = path.join(tempDir, '.github', 'workflows');
     fs.mkdirSync(workflowsDir, { recursive: true });
     const workflowYml = `
@@ -145,8 +132,7 @@ jobs:
         run: |
           gcloud builds submit \
             --project=\${{ env.PROJECT_ID }} \
-            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
-          || (echo "⚠️ Cloud Build log streaming failed" && exit 0)
+            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }}
 
       - name: Deploy to Cloud Run
         run: |
@@ -159,7 +145,7 @@ jobs:
 `.trim();
     fs.writeFileSync(path.join(workflowsDir, 'deploy.yml'), workflowYml);
 
-    // ⑥ Git 初期化 & Push
+    // ⑦ Git 初期化 → Push
     execSync('git init', { cwd: tempDir });
     execSync('git branch -M main', { cwd: tempDir });
     execSync('git config user.name "GitHub Actions Bot"', { cwd: tempDir });
@@ -171,24 +157,26 @@ jobs:
     const authRepoUrl = `https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${repoName}.git`;
     execSync(`git remote add origin ${authRepoUrl}`, { cwd: tempDir });
     execSync('git push origin main', { cwd: tempDir });
-    console.log('✅ コード＋ワークフローを GitHub に Push しました');
+    console.log('✅ コードとワークフローを GitHub に Push しました');
 
-    // ⑦ GitHub Secrets 登録
+    // ⑧ GitHub Secrets 登録
     console.log('⏳ GitHub Secrets 登録中…');
     await new Promise(r => setTimeout(r, 3000));
-    const publicKeyData = (await axios.get(
+    const secretsUrl = `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`;
+    const gcpKeyB64  = fs.readFileSync(path.join(__dirname, GCP_SA_KEY_FILE), 'utf-8');
+    const svcJson    = Buffer.from(gcpKeyB64, 'base64').toString('utf-8');
+
+    const { data: publicKeyData } = await axios.get(
       `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/public-key`,
       { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
-    )).data;
-
+    );
     await sodium.ready;
-    const gcpKeyB64 = fs.readFileSync(path.join(__dirname, GCP_SA_KEY_FILE), 'utf-8');
     const encrypted = sodium.crypto_box_seal(
-      Buffer.from(Buffer.from(gcpKeyB64, 'base64').toString('utf-8')),
+      Buffer.from(svcJson),
       Buffer.from(publicKeyData.key, 'base64')
     );
     await axios.put(
-      `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`,
+      secretsUrl,
       { encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: publicKeyData.key_id },
       { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
     );
