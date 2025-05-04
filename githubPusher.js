@@ -26,29 +26,43 @@ function slugify(name) {
     .replace(/-{2,}/g, '-');
 }
 
+/**
+ * code block or tag から中身を抽出するヘルパー
+ */
+function extractCode(reply, fenceRe, tagRe, stripTagsRe) {
+  const fence = reply.match(fenceRe);
+  if (fence) return fence[1].trim();
+  const tag = reply.match(tagRe);
+  if (tag) return tag[0].replace(stripTagsRe, '').trim();
+  return null;
+}
+
 async function pushCodeToRepository(repoUrl, appName, appDescription) {
   try {
     const slug = slugify(appName);
     console.log('✅ app slug =', slug);
 
-    // ① 作業用ディレクトリ
+    // ① 作業ディレクトリ
     const tempDir = path.join(__dirname, `app-${slug}-${Date.now()}`);
     fs.mkdirSync(tempDir);
     console.log(`✅ ① 作業用ディレクトリ: ${tempDir}`);
 
-    // ② ChatGPT へ要件渡してコード生成依頼
+    // ② ChatGPT にコード生成依頼
     console.log('⏳ ② ChatGPT へコード生成依頼中…');
     const openaiRes = await axios.post(
       'https://api.openai.com/v1/chat/completions',
       {
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: `
+          {
+            role: 'system',
+            content: `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
-- デザインは Google Material Design ガイドライン
+- デザインは Material Design
 - HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
-- コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`）で出力
-`.trim() },
+- コードブロック（\`\`\`html\`\`\` 等）で出力
+`.trim()
+          },
           { role: 'user', content: appDescription }
         ],
         temperature: 0.7,
@@ -58,34 +72,33 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
     );
     const reply = openaiRes.data.choices[0].message.content;
 
-    // ③ 生成コードをパースしてファイル化
-    const html = (reply.match(/```html\s*([\s\S]*?)```/i)?.[1] ||
-                  reply.match(/<html[\s\S]*?<\/html>/i)?.[0] ||
-                  '<!DOCTYPE html><html><body>HTML not found</body></html>').trim();
-    const css  = (reply.match(/```css\s*([\s\S]*?)```/i)?.[1] ||
-                  (reply.match(/<style[\s\S]*?<\/style>/i)?.[0] || '').replace(/<\/?style>/gi, '').trim() ||
-                  '/* CSS not found */');
-    const js   = (reply.match(/```js\s*([\s\S]*?<\/script>```/i)?.[1] ||
-                  (reply.match(/<script[\s\S]*?<\/script>/i)?.[0] || '').replace(/<\/?script>/gi, '').trim() ||
-                  `console.warn('JS not found');`);
+    // ③ HTML/CSS/JS 抽出
+    const html = extractCode(
+      reply,
+      /```html\s*([\s\S]*?)```/i,
+      /<html[\s\S]*?<\/html>/i,
+      /<\/?html>|<!DOCTYPE html>/gi
+    ) || '<!DOCTYPE html><html><body>HTML not found</body></html>';
 
+    const css = extractCode(
+      reply,
+      /```css\s*([\s\S]*?)```/i,
+      /<style[\s\S]*?<\/style>/i,
+      /<\/?style>/gi
+    ) || '/* CSS not found */';
+
+    // js と javascript 両対応
+    const js = extractCode(
+      reply,
+      /```(?:js|javascript)\s*([\s\S]*?)```/i,
+      /<script[\s\S]*?<\/script>/i,
+      /<\/?script>/gi
+    ) || `console.warn('JS not found');`;
+
+    // ファイル出力
     fs.writeFileSync(path.join(tempDir, 'index.html'), html);
     fs.writeFileSync(path.join(tempDir, 'styles.css'), css);
     fs.writeFileSync(path.join(tempDir, 'script.js'), js);
-
-    // ─── ここで必ず上書き ─────────────────────────────────────
-    // Yes/No ボタンのクリック処理を追加で埋め込む
-    const handlerJs = `
-document.addEventListener('DOMContentLoaded', () => {
-  const yesBtn = document.getElementById('yes-button');
-  const noBtn  = document.getElementById('no-button');
-  const result = document.getElementById('result');
-  yesBtn?.addEventListener('click', () => { result.textContent = '正解'; });
-  noBtn?.addEventListener('click', () => { result.textContent = '不正解'; });
-});
-`.trim();
-    fs.writeFileSync(path.join(tempDir, 'script.js'), handlerJs);
-    console.log('✅ ③ script.js を Yes/No ハンドラで上書きしました');
 
     // ④ Dockerfile
     const dockerfile = `
@@ -132,7 +145,8 @@ jobs:
         run: |
           gcloud builds submit \
             --project=\${{ env.PROJECT_ID }} \
-            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }}
+            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
+          || (echo "⚠️ Cloud Build log streaming failed" && exit 0)
 
       - name: Deploy to Cloud Run
         run: |
@@ -145,41 +159,40 @@ jobs:
 `.trim();
     fs.writeFileSync(path.join(workflowsDir, 'deploy.yml'), workflowYml);
 
-    // ⑥ Git 初期化・Push
-    execSync('git init',   { cwd: tempDir });
+    // ⑥ Git 初期化 & Push
+    execSync('git init', { cwd: tempDir });
     execSync('git branch -M main', { cwd: tempDir });
     execSync('git config user.name "GitHub Actions Bot"', { cwd: tempDir });
     execSync('git config user.email "actions@github.com"', { cwd: tempDir });
-    execSync('git add .',   { cwd: tempDir });
+    execSync('git add .', { cwd: tempDir });
     execSync('git commit --allow-empty -m "Initial commit"', { cwd: tempDir });
 
     const repoName    = repoUrl.split('/').pop().replace(/\.git$/, '');
     const authRepoUrl = `https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${repoName}.git`;
     execSync(`git remote add origin ${authRepoUrl}`, { cwd: tempDir });
     execSync('git push origin main', { cwd: tempDir });
-    console.log('✅ ⑥ Push to GitHub 完了');
+    console.log('✅ コード＋ワークフローを GitHub に Push しました');
 
-    // ⑦ GitHub Secrets 登録（GCP_SA_KEY）
-    console.log('⏳ ⑦ Secrets 登録中…');
+    // ⑦ GitHub Secrets 登録
+    console.log('⏳ GitHub Secrets 登録中…');
     await new Promise(r => setTimeout(r, 3000));
-    const secretsUrl = `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`;
-    const gcpKeyB64  = fs.readFileSync(path.join(__dirname, GCP_SA_KEY_FILE), 'utf-8');
-    const svcJson    = Buffer.from(gcpKeyB64, 'base64').toString('utf-8');
-    const { data: pub } = await axios.get(
+    const publicKeyData = (await axios.get(
       `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/public-key`,
-      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' } }
-    );
+      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
+    )).data;
+
     await sodium.ready;
+    const gcpKeyB64 = fs.readFileSync(path.join(__dirname, GCP_SA_KEY_FILE), 'utf-8');
     const encrypted = sodium.crypto_box_seal(
-      Buffer.from(svcJson),
-      Buffer.from(pub.key, 'base64')
+      Buffer.from(Buffer.from(gcpKeyB64, 'base64').toString('utf-8')),
+      Buffer.from(publicKeyData.key, 'base64')
     );
     await axios.put(
-      secretsUrl,
-      { encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: pub.key_id },
-      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' } }
+      `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`,
+      { encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: publicKeyData.key_id },
+      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
     );
-    console.log('✅ ⑦ Secrets 登録完了');
+    console.log('✅ GitHub Secrets 登録完了');
 
   } catch (err) {
     console.error('❌ コードPush失敗:', err.message);
