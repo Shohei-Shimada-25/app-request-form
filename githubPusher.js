@@ -1,11 +1,11 @@
 // githubPusher.js
 require('dotenv').config();
 
-const fs          = require('fs');
-const path        = require('path');
-const { execSync }= require('child_process');
-const axios       = require('axios');
-const sodium      = require('libsodium-wrappers');
+const fs           = require('fs');
+const path         = require('path');
+const { execSync } = require('child_process');
+const axios        = require('axios');
+const sodium       = require('libsodium-wrappers');
 
 const GITHUB_TOKEN    = process.env.GITHUB_TOKEN;
 const GITHUB_USER     = process.env.GITHUB_USER;
@@ -18,7 +18,7 @@ if (!PROJECT_ID) {
   throw new Error('環境変数 GOOGLE_CLOUD_PROJECT が設定されていません');
 }
 
-// slugify
+// ─── slugify ─────────────────────────────────────────────────────
 function slugify(name) {
   return name
     .toLowerCase()
@@ -27,17 +27,18 @@ function slugify(name) {
     .replace(/-{2,}/g, '-');
 }
 
+// ─── メイン ─────────────────────────────────────────────────────
 async function pushCodeToRepository(repoUrl, appName, appDescription) {
   try {
     const slug = slugify(appName);
     console.log('✅ app slug =', slug);
 
-    // ① 作業用ディレクトリ作成
+    // ① 作業用ディレクトリ
     const tempDir = path.join(__dirname, `app-${slug}-${Date.now()}`);
     fs.mkdirSync(tempDir);
     console.log(`✅ ① 作業用ディレクトリ: ${tempDir}`);
 
-    // ② ChatGPT にコード生成依頼
+    // ② ChatGPT へリクエスト
     console.log('⏳ ② ChatGPT へコード生成依頼中…');
     const openaiRes = await axios.post(
       'https://api.openai.com/v1/chat/completions',
@@ -46,9 +47,9 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
         messages: [
           { role: 'system', content: `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
-- デザインは Google Material Design ガイドラインを意識する
-- HTML には <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script> を必ず含める
-- コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`, \`\`\`javascript\`\`\`）で出力してください
+- デザインは Google Material Design ガイドライン
+- HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
+- コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`）で出力
 `.trim() },
           { role: 'user', content: appDescription }
         ],
@@ -57,30 +58,34 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
       },
       { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } }
     );
-    const reply = openaiRes.data.choices[0].message.content;
 
-    // ③ コードブロック優先パース
-    // HTML
-    const fenceHtml = reply.match(/```html\s*([\s\S]*?)```/i);
-    const html = (fenceHtml ? fenceHtml[1].trim()
-                : (reply.match(/<html[\s\S]*?<\/html>/i) || [''])[0])
-               || '<!DOCTYPE html><html><body>HTML not found</body></html>';
+    // ②.5: 生の応答を全部ログに出力
+    const rawReply = openaiRes.data.choices[0].message.content;
+    console.log('▶ raw ChatGPT reply:\n', rawReply);
 
-    // CSS
-    const fenceCss = reply.match(/```css\s*([\s\S]*?)```/i);
-    const cssBlock = fenceCss ? fenceCss[1].trim()
-                   : (reply.match(/<style[\s\S]*?<\/style>/i) || [''])[0];
-    const css = cssBlock.replace(/<\/?style>/gi, '').trim() || '/* CSS not found */';
+    // ③ フェンス（```html/css/js）から抽出
+    const fenceHtml = rawReply.match(/```html\s*([\s\S]*?)```/i);
+    const fenceCss  = rawReply.match(/```css\s*([\s\S]*?)```/i);
+    const fenceJs   = rawReply.match(/```js\s*([\s\S]*?)```/i);
 
-    // JS (```js``` or ```javascript```)
-    const fenceJs = reply.match(/```(?:js|javascript)\s*([\s\S]*?)```/i);
-    const scriptTag = reply.match(/<script\b[^>]*>([\s\S]*?)<\/script>/i);
-    const rawJs = fenceJs
-      ? fenceJs[1].trim()
-      : (scriptTag ? scriptTag[1].trim() : '');
-    const js = rawJs || `console.warn('JS not found');`;
+    const html = fenceHtml
+      ? fenceHtml[1].trim()
+      : '<!DOCTYPE html><html><body>HTML not found</body></html>';
+    console.log('▶ extracted HTML:\n', html);
 
-    console.log('▶ extracted script.js:\n' + js);
+    const css = fenceCss
+      ? fenceCss[1].trim()
+      : '/* CSS not found */';
+    console.log('▶ extracted CSS:\n', css);
+
+    let js;
+    if (fenceJs) {
+      js = fenceJs[1].trim();
+    } else {
+      console.warn('⚠️ JS code block not found; falling back to default.');
+      js = `console.warn('JS not found');`;
+    }
+    console.log('▶ extracted JS:\n', js);
 
     // ④ ファイル書き出し
     fs.writeFileSync(path.join(tempDir, 'index.html'), html);
@@ -99,7 +104,7 @@ COPY script.js   /usr/share/nginx/html/script.js
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
-    // ⑥ GitHub Actions ワークフロー生成
+    // ⑥ Actions ワークフロー生成
     const workflowsDir = path.join(tempDir, '.github', 'workflows');
     fs.mkdirSync(workflowsDir, { recursive: true });
     const workflowYml = `
@@ -119,21 +124,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: \${{ secrets.GCP_SA_KEY }}
           project_id:       \${{ env.PROJECT_ID }}
-
       - uses: google-github-actions/setup-gcloud@v2
-
       - name: Build & Push Docker image
         run: |
           gcloud builds submit \
             --project=\${{ env.PROJECT_ID }} \
             --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }}
-
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy \${{ env.APP_SLUG }} \
@@ -157,9 +158,9 @@ jobs:
     const authRepoUrl = `https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${repoName}.git`;
     execSync(`git remote add origin ${authRepoUrl}`, { cwd: tempDir });
     execSync('git push origin main', { cwd: tempDir });
-    console.log('✅ コードとワークフローを GitHub に Push しました');
+    console.log('✅ コードとワークフローを GitHub に Push');
 
-    // ⑧ GitHub Secrets 登録
+    // ⑧ Secrets 登録
     console.log('⏳ GitHub Secrets 登録中…');
     await new Promise(r => setTimeout(r, 3000));
     const secretsUrl = `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/GCP_SA_KEY`;
@@ -168,7 +169,12 @@ jobs:
 
     const { data: publicKeyData } = await axios.get(
       `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/public-key`,
-      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
+      {
+        headers: {
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Accept:        'application/vnd.github+json'
+        }
+      }
     );
     await sodium.ready;
     const encrypted = sodium.crypto_box_seal(
@@ -177,8 +183,16 @@ jobs:
     );
     await axios.put(
       secretsUrl,
-      { encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: publicKeyData.key_id },
-      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' }}
+      {
+        encrypted_value: Buffer.from(encrypted).toString('base64'),
+        key_id:          publicKeyData.key_id
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Accept:        'application/vnd.github+json'
+        }
+      }
     );
     console.log('✅ GitHub Secrets 登録完了');
 
