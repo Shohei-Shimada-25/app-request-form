@@ -11,18 +11,16 @@ async function createNewRepository(repoName) {
     name: repoName,
     private: false
   };
-  // Basic auth で渡す
-  const auth = {
-    username: GITHUB_USER,
-    password: GITHUB_TOKEN
-  };
+
+  // Basic 認証ヘッダーを手動で組み立て
+  const basicAuth = Buffer.from(`${GITHUB_USER}:${GITHUB_TOKEN}`).toString('base64');
   const headers = {
-    Accept: 'application/vnd.github+json'
+    'Authorization': `Basic ${basicAuth}`,
+    'Accept':        'application/vnd.github+json'
   };
 
-  const res = await axios.post(url, data, { auth, headers });
-  // 作成されたリポジトリの HTTPS URL を返す
-  return res.data.clone_url;
+  const res = await axios.post(url, data, { headers });
+  return res.data.clone_url;  // 例: "https://github.com/あなた/リポ名.git"
 }
 
 module.exports = { createNewRepository };
