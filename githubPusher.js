@@ -111,9 +111,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: google-github-actions/auth@v2
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
         with:
           project_id:       \${{ env.PROJECT_ID }}
           create_credentials_file: true
