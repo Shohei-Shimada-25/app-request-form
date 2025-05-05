@@ -1,11 +1,11 @@
 // githubPusher.js
 require('dotenv').config();
 
-const fs = require('fs');
-const path = require('path');
+const fs           = require('fs');
+const path         = require('path');
 const { execSync } = require('child_process');
-const axios = require('axios');
-const sodium = require('libsodium-wrappers');
+const axios        = require('axios');
+const sodium       = require('libsodium-wrappers');
 
 const {
   GITHUB_TOKEN,
@@ -31,6 +31,7 @@ function slugify(name) {
 
 // ─── メイン ─────────────────────────────────────────────────────
 async function pushCodeToRepository(repoUrl, appName, appDescription) {
+  let rawReply;
   try {
     const slug = slugify(appName);
     console.log('✅ app slug =', slug);
@@ -66,20 +67,17 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
         },
       }
     );
-
-    const rawReply = openaiRes.data.choices[0].message.content;
+    rawReply = openaiRes.data.choices[0].message.content;
     console.log('▶ raw ChatGPT reply:\n', rawReply);
 
-    // ③ 抽出
+    // ③ コード抽出
     const fenceHtml = rawReply.match(/```html\s*([\s\S]*?)```/i);
-    const fenceCss = rawReply.match(/```css\s*([\s\S]*?)```/i);
-    const fenceJs = rawReply.match(/```js\s*([\s\S]*?)```/i);
+    const fenceCss  = rawReply.match(/```css\s*([\s\S]*?)```/i);
+    const fenceJs   = rawReply.match(/```js\s*([\s\S]*?)```/i);
 
-    const html = fenceHtml
-      ? fenceHtml[1].trim()
-      : '<!DOCTYPE html><html><body>HTML not found</body></html>';
-    const css = fenceCss ? fenceCss[1].trim() : '/* CSS not found */';
-    const js = fenceJs ? fenceJs[1].trim() : "console.warn('JS not found');";
+    const html = fenceHtml ? fenceHtml[1].trim() : '<!DOCTYPE html><html><body>HTML not found</body></html>';
+    const css  = fenceCss  ? fenceCss[1].trim()  : '/* CSS not found */';
+    const js   = fenceJs   ? fenceJs[1].trim()   : "console.warn('JS not found');";
 
     // ④ ファイル書き出し
     fs.writeFileSync(path.join(tempDir, 'index.html'), html);
@@ -93,12 +91,12 @@ ENV PORT 8080
 RUN sed -i 's/listen       80;/listen       8080;/' /etc/nginx/conf.d/default.conf
 EXPOSE 8080
 COPY index.html /usr/share/nginx/html/index.html
-COPY styles.css /usr/share/nginx/html/styles.css
-COPY script.js /usr/share/nginx/html/script.js
+COPY styles.css  /usr/share/nginx/html/styles.css
+COPY script.js   /usr/share/nginx/html/script.js
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
-    // ⑥ Actions workflow
+    // ⑥ Actions ワークフロー
     const workflowsDir = path.join(tempDir, '.github', 'workflows');
     fs.mkdirSync(workflowsDir, { recursive: true });
     const workflowYml = `
@@ -130,18 +128,10 @@ jobs:
           project_id: \${{ env.PROJECT_ID }}
       - name: Build & Push Docker image
         run: |
-          gcloud builds submit \
-            --project=\${{ env.PROJECT_ID }} \
-            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
-            || (echo "⚠️ Cloud Build log streaming failed—continuing anyway" && exit 0)
+          gcloud builds submit --project=\${{ env.PROJECT_ID }} --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} || (echo "⚠️ Cloud Build log streaming failed—continuing anyway" && exit 0)
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy \${{ env.APP_SLUG }} \
-            --project=\${{ env.PROJECT_ID }} \
-            --image gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
-            --platform managed \
-            --region \${{ env.REGION }} \
-            --allow-unauthenticated
+          gcloud run deploy \${{ env.APP_SLUG }} --project=\${{ env.PROJECT_ID }} --image gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} --platform managed --region \${{ env.REGION }} --allow-unauthenticated
 `.trim();
     fs.writeFileSync(path.join(workflowsDir, 'deploy.yml'), workflowYml);
 
@@ -153,7 +143,7 @@ jobs:
     execSync('git add .', { cwd: tempDir });
     execSync('git commit --allow-empty -m "Initial commit"', { cwd: tempDir });
 
-    const repoName = repoUrl.split('/').pop().replace(/\.git$/, '');
+    const repoName    = repoUrl.split('/').pop().replace(/\.git$/, '');
     const authRepoUrl = `https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${repoName}.git`;
     execSync(`git remote add origin ${authRepoUrl}`, { cwd: tempDir });
     execSync('git push origin main', { cwd: tempDir });
@@ -166,34 +156,31 @@ jobs:
 
     const { data: publicKeyData } = await axios.get(
       `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/public-key`,
-      {
-        headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
-          Accept: 'application/vnd.github+json',
-        },
-      }
+      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' } }
     );
-
     await sodium.ready;
     const encrypted = sodium.crypto_box_seal(
       Buffer.from(gcpKeyJson),
       Buffer.from(publicKeyData.key, 'base64')
     );
-
     await axios.put(
       secretsUrl,
-      {
-        encrypted_value: Buffer.from(encrypted).toString('base64'),
-        key_id: publicKeyData.key_id,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
-          Accept: 'application/vnd.github+json',
-        },
-      }
+      { encrypted_value: Buffer.from(encrypted).toString('base64'), key_id: publicKeyData.key_id },
+      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' } }
     );
     console.log('✅ GitHub Secrets 登録完了');
+
+    // ⑨ リターン値生成
+    const runUrl = `https://${slug}-${PROJECT_ID}.${REGION}.run.app`;
+    return {
+      repoUrl,
+      runUrl,
+      history: {
+        user: appDescription,
+        ai: rawReply,
+      },
+    };
+
   } catch (error) {
     console.error('❌ コードPush失敗:', error.message);
     throw error;
