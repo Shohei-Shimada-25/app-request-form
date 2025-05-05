@@ -85,15 +85,20 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
     fs.writeFileSync(path.join(tempDir, 'styles.css'), css);
     fs.writeFileSync(path.join(tempDir, 'script.js'), js);
 
-    // ⑤ Dockerfile
+    // ⑤ Dockerfile（リッスンポートを確実に 8080 に）
     const dockerfile = `
 FROM nginx:alpine
+# Cloud Run の PORT 環境変数を 8080 に固定
 ENV PORT 8080
-RUN sed -i 's/listen       80;/listen       8080;/' /etc/nginx/conf.d/default.conf
+# デフォルト listen 設定をどのポート番号からでも 8080 へ置換
+RUN sed -E -i 's/listen[[:space:]]+[0-9]+;/listen $PORT;/' \
+    /etc/nginx/conf.d/default.conf
 EXPOSE 8080
 COPY index.html /usr/share/nginx/html/index.html
 COPY styles.css  /usr/share/nginx/html/styles.css
 COPY script.js   /usr/share/nginx/html/script.js
+# フォアグラウンドで起動
+CMD ["nginx", "-g", "daemon off;"]
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
@@ -129,10 +134,19 @@ jobs:
           project_id: \${{ env.PROJECT_ID }}
       - name: Build & Push Docker image
         run: |
-          gcloud builds submit --project=\${{ env.PROJECT_ID }} --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} || (echo "⚠️ Cloud Build log streaming failed—continuing anyway" && exit 0)
+          gcloud builds submit \
+            --project=\${{ env.PROJECT_ID }} \
+            --tag gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
+            || (echo "⚠️ Cloud Build log streaming failed—continuing anyway" && exit 0)
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy \${{ env.APP_SLUG }} --project=\${{ env.PROJECT_ID }} --image gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} --platform managed --region \${{ env.REGION }} --allow-unauthenticated
+          gcloud run deploy \${{ env.APP_SLUG }} \
+            --project=\${{ env.PROJECT_ID }} \
+            --image gcr.io/\${{ env.PROJECT_ID }}/\${{ env.APP_SLUG }} \
+            --platform managed \
+            --region \${{ env.REGION }} \
+            --allow-unauthenticated \
+            --timeout 300s
 `.trim();
     fs.writeFileSync(path.join(workflowsDir, 'deploy.yml'), workflowYml);
 
@@ -177,18 +191,11 @@ jobs:
       scopes: ['https://www.googleapis.com/auth/cloud-platform'],
     });
     const crm = google.cloudresourcemanager({ version: 'v1', auth: authClient });
-    const project = await crm.projects.get({ projectId: PROJECT_ID });
-    const projectNumber = project.data.projectNumber;
-    const runUrl = `https://${slug}-${projectNumber}.${REGION}.run.app`;
+    const project    = await crm.projects.get({ projectId: PROJECT_ID });
+    const projNumber = project.data.projectNumber;
+    const runUrl     = `https://${slug}-${projNumber}.${REGION}.run.app`;
 
-    return {
-      repoUrl,
-      runUrl,
-      history: {
-        user: appDescription,
-        ai: rawReply,
-      },
-    };
+    return { repoUrl, runUrl, history: { user: appDescription, ai: rawReply } };
 
   } catch (error) {
     console.error('❌ コードPush失敗:', error.message);
