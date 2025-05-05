@@ -161,12 +161,16 @@ jobs:
     execSync('git push origin main',                     { cwd: tempDir });
     console.log('✅ コードとワークフローを GitHub に Push');
 
-    // ⑧ メタデータ経由で numeric-project-id を取得
+    // ⑧ メタデータ経由で numeric-project-id を取得 (文字列として扱う)
     const mdRes = await axios.get(
       'http://metadata.google.internal/computeMetadata/v1/project/numeric-project-id',
-      { headers: { 'Metadata-Flavor': 'Google' } }
+      {
+        headers:        { 'Metadata-Flavor': 'Google' },
+        responseType:   'text'
+      }
     );
     const projNumber = mdRes.data.trim();
+
     const runUrl     = `https://${slug}-${projNumber}.${REGION}.run.app`;
 
     // 最終的に必要な情報を返す
