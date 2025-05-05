@@ -13,6 +13,7 @@ const {
   OPENAI_API_KEY,
   GOOGLE_CLOUD_PROJECT: PROJECT_ID,
   CLOUD_RUN_REGION: REGION = 'asia-northeast1',
+  GCP_SA_KEY_FILE,
 } = process.env;
 
 if (!PROJECT_ID) {
@@ -28,9 +29,8 @@ function slugify(name) {
     .replace(/-{2,}/g, '-');
 }
 
-// ─── GitHub Actions Secret 登録 ─────────────────────────────────
+// ─── GitHub Secret 登録 ──────────────────────────────────────────
 async function registerSecret(repoName, secretName, secretValue) {
-  // 1) 公開鍵取得
   const { data: publicKeyData } = await axios.get(
     `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/public-key`,
     {
@@ -42,13 +42,11 @@ async function registerSecret(repoName, secretName, secretValue) {
   );
 
   await sodium.ready;
-  // 2) シークレットを暗号化
   const encrypted = sodium.crypto_box_seal(
     Buffer.from(secretValue),
     Buffer.from(publicKeyData.key, 'base64')
   );
 
-  // 3) GitHub に PUT
   await axios.put(
     `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/secrets/${secretName}`,
     {
@@ -64,7 +62,7 @@ async function registerSecret(repoName, secretName, secretValue) {
   );
 }
 
-// ─── GitHub Actions Workflow Dispatch ──────────────────────────
+// ─── Actions ワークフローの手動トリガー ──────────────────────────
 async function dispatchWorkflow(repoName) {
   await axios.post(
     `https://api.github.com/repos/${GITHUB_USER}/${repoName}/actions/workflows/deploy.yml/dispatches`,
@@ -78,26 +76,28 @@ async function dispatchWorkflow(repoName) {
   );
 }
 
-// ─── メイン関数 ─────────────────────────────────────────────────
+// ─── メイン処理 ─────────────────────────────────────────────────
 async function pushCodeToRepository(repoUrl, appName, appDescription) {
   let rawReply;
   try {
-    const slug = slugify(appName);
-    console.log('✅ app slug =', slug);
+    // slug ベースを作成し、さらに timestamp を付与して常に一意にする
+    const baseSlug   = slugify(appName);
+    const uniqueSlug = `${baseSlug}-${Date.now()}`;
+    console.log('✅ uniqueSlug =', uniqueSlug);
 
-    // ① 作業用ディレクトリ作成
-    const tempDir = path.join(__dirname, `app-${slug}-${Date.now()}`);
-    fs.mkdirSync(tempDir);
+    // ① 作業ディレクトリを生成
+    const tempDir = path.join(__dirname, `app-${uniqueSlug}`);
+    fs.mkdirSync(tempDir, { recursive: true });
     console.log(`✅ 作業用ディレクトリ: ${tempDir}`);
 
-    // ② ChatGPT にコード生成依頼
+    // ② ChatGPT にコード依頼
     const systemPrompt = `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
 - デザインは Google Material Design ガイドラインを意識する
 - HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
 - コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`）で出力
 `.trim();
-    console.log('⏳ ChatGPT へリクエスト中...');
+    console.log('⏳ ChatGPT へリクエスト中…');
     const openaiRes = await axios.post(
       'https://api.openai.com/v1/chat/completions',
       {
@@ -124,22 +124,16 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
     const fenceCss  = rawReply.match(/```css\s*([\s\S]*?)```/i);
     const fenceJs   = rawReply.match(/```js\s*([\s\S]*?)```/i);
 
-    const html = fenceHtml
-      ? fenceHtml[1].trim()
-      : '<!DOCTYPE html><html><body>HTML not found</body></html>';
-    const css  = fenceCss
-      ? fenceCss[1].trim()
-      : '/* CSS not found */';
-    const js   = fenceJs
-      ? fenceJs[1].trim()
-      : `console.warn('JS not found');`;
+    const html = fenceHtml ? fenceHtml[1].trim() : '<!DOCTYPE html><html><body>HTML not found</body></html>';
+    const css  = fenceCss  ? fenceCss[1].trim()  : '/* CSS not found */';
+    const js   = fenceJs   ? fenceJs[1].trim()   : `console.warn('JS not found');`;
 
     // ④ ファイル書き出し
     fs.writeFileSync(path.join(tempDir, 'index.html'), html);
     fs.writeFileSync(path.join(tempDir, 'styles.css'), css);
     fs.writeFileSync(path.join(tempDir, 'script.js'), js);
 
-    // ⑤ Dockerfile を出力
+    // ⑤ Dockerfile 書き出し
     const dockerfile = `
 FROM nginx:alpine
 ENV PORT 8080
@@ -152,34 +146,33 @@ CMD ["nginx", "-g", "daemon off;"]
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
-    // ⑥ GitHub リポジトリ作成
+    // ⑥ GitHub リポジトリ作成（createNewRepository は slug 名を受け取る想定）
     const { createNewRepository } = require('./githubRepoCreator');
-    const repoUrlNew = await createNewRepository(appName);
+    const repoUrlNew = await createNewRepository(uniqueSlug);
     console.log('✅ GitHub リポジトリ作成:', repoUrlNew);
     const repoName = repoUrlNew.split('/').pop().replace(/\.git$/, '');
 
-    // ⑦ Git 初期コミット（コードのみ）
+    // ⑦ 初回コミット (コード＋Dockerfileのみ)
     execSync('git init',       { cwd: tempDir });
     execSync('git branch -M main', { cwd: tempDir });
     execSync('git config user.name "GitHub Actions Bot"', { cwd: tempDir });
     execSync('git config user.email "actions@github.com"', { cwd: tempDir });
     execSync('git add index.html styles.css script.js Dockerfile', { cwd: tempDir });
-    execSync('git commit --allow-empty -m "chore: initial code"', { cwd: tempDir });
+    execSync('git commit -m "chore: initial code"',            { cwd: tempDir });
 
-    // 認証付きリモート URL にユーザー名は不要（トークンだけでOK）
+    // token 認証用 URL (ユーザー名省略可)
     const authRepoUrl = `https://${GITHUB_TOKEN}@github.com/${GITHUB_USER}/${repoName}.git`;
     execSync(`git remote add origin ${authRepoUrl}`, { cwd: tempDir });
-    execSync('git push origin main',                        { cwd: tempDir });
+    execSync('git push origin main',                   { cwd: tempDir });
     console.log('✅ コードを GitHub に Push');
 
-    // ⑧ GitHub Actions Secret 登録 (GCP_SA_KEY)
-    console.log('⏳ GitHub Secret 登録…');
-    // b64 エンコード or プレーン JSON がそのまま入っている前提
-    const svcJson = fs.readFileSync(process.env.GCP_SA_KEY_FILE, 'utf-8');
+    // ⑧ GitHub Actions Secret 登録
+    console.log('⏳ GitHub Secret を登録中…');
+    const svcJson = fs.readFileSync(GCP_SA_KEY_FILE, 'utf-8');
     await registerSecret(repoName, 'GCP_SA_KEY', svcJson);
     console.log('✅ Secret 登録完了');
 
-    // ⑨ ワークフローファイルを作成
+    // ⑨ ワークフロー定義を追加
     const workflowsDir = path.join(tempDir, '.github', 'workflows');
     fs.mkdirSync(workflowsDir, { recursive: true });
     const workflowYml = `
@@ -188,7 +181,7 @@ on:
   push:
     branches: [ main ]
 env:
-  APP_SLUG: ${slug}
+  APP_SLUG: ${uniqueSlug}
   PROJECT_ID: ${PROJECT_ID}
   REGION: ${REGION}
 jobs:
@@ -224,19 +217,19 @@ jobs:
 `.trim();
     fs.writeFileSync(path.join(workflowsDir, 'deploy.yml'), workflowYml);
 
-    // ⑩ ワークフロー登録コミット & Push
+    // ⑩ ワークフローをコミット & Push
     execSync('git add .github/workflows/deploy.yml', { cwd: tempDir });
     execSync('git commit -m "chore: add deploy workflow"', { cwd: tempDir });
-    execSync('git push origin main',                { cwd: tempDir });
-    console.log('✅ ワークフローを GitHub に Push');
+    execSync('git push origin main',                   { cwd: tempDir });
+    console.log('✅ ワークフローを Push');
 
-    // ⑪ Workflow Dispatch（明示的に起動）
-    console.log('⏳ ワークフローをトリガー中…');
+    // ⑪ 明示的にワークフローを Dispatch
+    console.log('⏳ ワークフローを起動中…');
     await dispatchWorkflow(repoName);
-    console.log('✅ ワークフロー Dispatched');
+    console.log('✅ Workflow dispatched');
 
-    // ⑫ メタデータサーバから numeric-project-id を取得
-    const mdRes = await axios.get(
+    // ⑫ メタデータサーバからプロジェクト番号を取得
+    const mdRes       = await axios.get(
       'http://metadata.google.internal/computeMetadata/v1/project/numeric-project-id',
       {
         headers:      { 'Metadata-Flavor': 'Google' },
@@ -244,7 +237,7 @@ jobs:
       }
     );
     const projNumber = mdRes.data.trim();
-    const runUrl     = `https://${slug}-${projNumber}.${REGION}.run.app`;
+    const runUrl     = `https://${uniqueSlug}-${projNumber}.${REGION}.run.app`;
 
     return {
       repoUrl:  repoUrlNew,
@@ -255,7 +248,7 @@ jobs:
       },
     };
   } catch (error) {
-    console.error('❌ コードPush失敗:', error);
+    console.error('❌ コードPush失敗:', error.response?.data || error);
     throw error;
   }
 }
