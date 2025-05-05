@@ -115,8 +115,10 @@ jobs:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: \${{ secrets.GCP_SA_KEY }}
           project_id:       \${{ env.PROJECT_ID }}
+          create_credentials_file: true
+          export_environment_variables: true
+          credentials_json: \${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
       - name: Build & Push Docker image
         run: |
