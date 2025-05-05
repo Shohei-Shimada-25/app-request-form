@@ -6,6 +6,7 @@ const path         = require('path');
 const { execSync } = require('child_process');
 const axios        = require('axios');
 const sodium       = require('libsodium-wrappers');
+const { google }   = require('googleapis');
 
 const {
   GITHUB_TOKEN,
@@ -45,7 +46,7 @@ async function pushCodeToRepository(repoUrl, appName, appDescription) {
     const systemPrompt = `
 あなたはプロのフロントエンドエンジニアです。以下要件をもとに、HTML/CSS/JSを「分割して」生成してください。
 - デザインは Google Material Design ガイドラインを意識する
-- HTML に <link rel="stylesheet" href="styles.css"> と <script src="script.js" defer></script>
+- HTML に <link rel=\"stylesheet\" href=\"styles.css\"> と <script src=\"script.js\" defer></script>
 - コードブロック（\`\`\`html\`\`\`, \`\`\`css\`\`\`, \`\`\`js\`\`\`）で出力
 `.trim();
     console.log('⏳ ChatGPT へリクエスト中...');
@@ -96,7 +97,7 @@ COPY script.js   /usr/share/nginx/html/script.js
 `.trim();
     fs.writeFileSync(path.join(tempDir, 'Dockerfile'), dockerfile);
 
-    // ⑥ Actions ワークフロー
+    // ⑥ Actions ワークフロー生成
     const workflowsDir = path.join(tempDir, '.github', 'workflows');
     fs.mkdirSync(workflowsDir, { recursive: true });
     const workflowYml = `
@@ -170,8 +171,16 @@ jobs:
     );
     console.log('✅ GitHub Secrets 登録完了');
 
-    // ⑨ リターン値生成
-    const runUrl = `https://${slug}-${PROJECT_ID}.${REGION}.run.app`;
+    // ⑨ プロジェクト番号取得 & アプリURL生成
+    const authClient = await google.auth.getClient({
+      keyFile: path.join(__dirname, GCP_SA_KEY_FILE),
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    const crm = google.cloudresourcemanager({ version: 'v1', auth: authClient });
+    const project = await crm.projects.get({ projectId: PROJECT_ID });
+    const projectNumber = project.data.projectNumber;
+    const runUrl = `https://${slug}-${projectNumber}.${REGION}.run.app`;
+
     return {
       repoUrl,
       runUrl,
